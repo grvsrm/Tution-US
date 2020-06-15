@@ -1,0 +1,241 @@
+---
+title: "Tution"
+author: "Gaurav Sharma"
+date: "15/06/2020"
+output: github_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+```
+
+# Load Data
+```{r}
+tuition_cost <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-03-10/tuition_cost.csv")
+
+diversity_raw <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-03-10/diversity_school.csv") 
+
+diversity_school <- diversity_raw %>%
+  filter(category == "Total Minority") %>%
+  mutate(TotalMinority = enrollment / total_enrollment)
+```
+
+# Explore Data
+```{r}
+tuition_cost %>% 
+    tabyl(type)
+
+diversity_school %>% 
+    ggplot(aes(TotalMinority)) +
+    geom_histogram() +
+    geom_vline(xintercept =  median(diversity_school$TotalMinority), color = 'pink', size = 3) +
+    geom_vline(xintercept =  mean(diversity_school$TotalMinority), color = 'blue', size = 3) +
+  annotate("text", x = 0.43, y = 300, label = 'Mean', size = 5, color = 'blue')
+  
+```
+
+# Wrangle the data to prepare it for modelling
+```{r}
+university_df <- diversity_school %>% 
+  transmute(diversity = case_when(TotalMinority > 0.3 ~ "High",
+                                  TRUE ~ "Low"),
+            name, state,
+            total_enrollment) %>% 
+  inner_join(tuition_cost %>% 
+               select(name, type, degree_length,
+                      in_state_tuition:out_of_state_total)) %>% 
+  left_join(tibble(state = state.name, region = state.region)) %>% 
+  select(-name, -state) %>% 
+  mutate_if(is_character, factor)
+  
+skimr::skim(university_df)
+```
+
+# Lets do some visualization
+```{r}
+university_df %>% 
+  ggplot(aes(type, in_state_tuition, fill = diversity)) +
+  facet_wrap(~region) +
+  geom_boxplot() +
+  scale_y_continuous(labels = scales::dollar_format())
+
+university_df %>% 
+  ggplot(aes(type, total_enrollment, fill = diversity)) +
+  geom_boxplot() +
+  scale_y_log10()
+
+
+
+```
+
+
+
+# lets split the data
+```{r}
+set.seed(1234)
+
+uni_split <- university_df %>% 
+  initial_split(strata = diversity)
+
+uni_train <- training(uni_split)
+uni_test <- testing(uni_split)
+
+```
+
+# Create a recipe
+```{r}
+
+uni_recipe <- recipe(diversity~., data = uni_train) %>%
+  step_corr(all_numeric()) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_zv(all_numeric()) %>%
+  step_normalize(all_numeric()) %>% 
+  prep()
+  
+uni_recipe 
+  
+```
+
+# Lets create a few models for classification
+```{r}
+
+# Logistic Regression
+glm_spec <- logistic_reg() %>% 
+  set_engine(engine = 'glm') %>% 
+  set_mode(mode = 'classification')
+
+glm_fit <- glm_spec %>% 
+  fit(diversity~., data = juice(uni_recipe))
+
+glm_fit
+
+# nearest neighour
+knn_spec <- nearest_neighbor() %>% 
+  set_engine(engine = 'kknn') %>% 
+  set_mode(mode = 'classification')
+
+knn_fit <- knn_spec %>% 
+  fit(diversity~., data = juice(uni_recipe))
+
+knn_fit
+
+# Decision Tree
+tree_spec <- decision_tree() %>% 
+  set_engine(engine = 'rpart') %>% 
+  set_mode(mode = 'classification')
+
+tree_fit <- tree_spec %>% 
+  fit(diversity~., data = juice(uni_recipe))
+
+tree_fit
+```
+
+# Lets compare these models using resampling
+```{r}
+set.seed(123)
+folds <- juice(uni_recipe) %>% 
+  vfold_cv(strata = diversity)
+
+set.seed(234)
+glm_rs <- fit_resamples(glm_spec,
+              diversity~.,
+              resamples = folds,
+              metrics = metric_set(roc_auc, spec, sens, precision, recall, accuracy),
+              control = control_resamples(save_pred = T))
+
+glm_rs %>% 
+  collect_metrics()
+
+set.seed(234)
+knn_rs <- fit_resamples(knn_spec,
+              diversity~.,
+              resamples = folds,
+              metrics = metric_set(roc_auc, spec, sens, precision, recall, accuracy),
+              control = control_resamples(save_pred = T))
+
+knn_rs %>% 
+  collect_metrics()
+
+
+set.seed(234)
+tree_rs <- fit_resamples(tree_spec,
+              diversity~.,
+              resamples = folds,
+              metrics = metric_set(roc_auc, spec, sens, precision, recall, accuracy),
+              control = control_resamples(save_pred = T))
+
+tree_rs %>% 
+  collect_metrics()
+
+```
+
+# Lets visualize the roc auc curve
+
+```{r}
+glm_rs %>%
+  unnest(.predictions) %>%
+  mutate(model = "glm") %>%
+  bind_rows(knn_rs %>%
+              unnest(.predictions) %>%
+              mutate(model = "knn")) %>%
+  bind_rows(tree_rs %>%
+              unnest(.predictions) %>%
+              mutate(model = "tree")) %>% 
+  group_by(model) %>% 
+  roc_curve(diversity, .pred_High) %>% 
+  autoplot()
+
+
+
+```
+
+# Test the model on test data on logistic model
+```{r}
+glm_fit %>% 
+  predict(new_data = bake(uni_recipe, new_data = uni_test), type = 'prob') %>% 
+  mutate(truth = uni_test$diversity) %>% 
+  roc_auc(truth, .pred_High)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
